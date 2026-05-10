@@ -39,6 +39,9 @@
 #define FIRMWARE_VERSION 2
 #define I2C_ADDRESS 0x61
 #define CH_NUMBER 6
+#define PWM_TIMER_HZ 1000000UL
+#define PWM_DEFAULT_PERIOD_US 2550
+#define PWM_DEFAULT_FREQ_HZ (PWM_TIMER_HZ / PWM_DEFAULT_PERIOD_US)
 #define ANGLE_TO_PULSE(angle) ((uint16_t)(500 + (angle * 2000 / 180)))//Angle convert to pulse
 /* USER CODE END PD */
 
@@ -65,6 +68,9 @@ uint8_t rgb_multi_led_color[CH_NUMBER][7];
 
 uint8_t pwm_duty[CH_NUMBER][2] = {0};
 volatile uint16_t pwm_pulse[CH_NUMBER][2] = {{0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}};
+volatile uint16_t pwm_period[CH_NUMBER][2] = {{PWM_DEFAULT_PERIOD_US, PWM_DEFAULT_PERIOD_US}, {PWM_DEFAULT_PERIOD_US, PWM_DEFAULT_PERIOD_US}, {PWM_DEFAULT_PERIOD_US, PWM_DEFAULT_PERIOD_US}, {PWM_DEFAULT_PERIOD_US, PWM_DEFAULT_PERIOD_US}, {PWM_DEFAULT_PERIOD_US, PWM_DEFAULT_PERIOD_US}, {PWM_DEFAULT_PERIOD_US, PWM_DEFAULT_PERIOD_US}};
+volatile uint16_t pwm_frequency[CH_NUMBER][2] = {{PWM_DEFAULT_FREQ_HZ, PWM_DEFAULT_FREQ_HZ}, {PWM_DEFAULT_FREQ_HZ, PWM_DEFAULT_FREQ_HZ}, {PWM_DEFAULT_FREQ_HZ, PWM_DEFAULT_FREQ_HZ}, {PWM_DEFAULT_FREQ_HZ, PWM_DEFAULT_FREQ_HZ}, {PWM_DEFAULT_FREQ_HZ, PWM_DEFAULT_FREQ_HZ}, {PWM_DEFAULT_FREQ_HZ, PWM_DEFAULT_FREQ_HZ}};
+volatile uint16_t pwm_cycle_start[CH_NUMBER][2] = {0};
 uint8_t pwm_disable[CH_NUMBER][2] = {{1, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 1}};
 uint8_t servo_angle[CH_NUMBER][2] = {0};
 volatile uint16_t servo_pulse[CH_NUMBER][2] = {{0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}};
@@ -253,7 +259,28 @@ void readADCState(uint32_t channel, uint8_t bit_mode)
 
 void SetPWMPulse(uint8_t ch, uint8_t pos, uint16_t pulse)
 {
-  pwm_pulse[ch][pos] = pulse*10;  
+  pwm_pulse[ch][pos] = (uint16_t)(((uint32_t)pulse * pwm_period[ch][pos]) / 255);
+}
+
+uint8_t SetPWMFrequency(uint8_t ch, uint8_t pos, uint16_t frequency)
+{
+  uint32_t period;
+
+  if (ch >= CH_NUMBER || pos >= 2 || frequency == 0) {
+    return 0;
+  }
+
+  period = PWM_TIMER_HZ / frequency;
+  if (period == 0 || period > 0xffff) {
+    return 0;
+  }
+
+  pwm_frequency[ch][pos] = frequency;
+  pwm_period[ch][pos] = (uint16_t)period;
+  pwm_cycle_start[ch][pos] = (uint16_t)TIM16->CNT;
+  SetPWMPulse(ch, pos, pwm_duty[ch][pos]);
+
+  return 1;
 }
 
 void set_single_rgb_led(uint16_t index, uint8_t ch)
@@ -418,7 +445,18 @@ void Slave_Complete_Callback(uint8_t *rx_data, uint16_t len)
         if (pwm_duty[ch][cmd-2] == 0)
           gpio_write_level_low(gpio_ch_to_port[ch][cmd-2], gpio_pinmap[ch][cmd-2]);
         SetPWMPulse(ch, cmd-2, pwm_duty[ch][cmd-2]);
-      }     
+      }
+      else if (cmd == 7) {
+        if (len == 3) {
+          uint16_t frequency = rx_data[1] | (rx_data[2] << 8);
+          SetPWMFrequency(ch, 0, frequency);
+          SetPWMFrequency(ch, 1, frequency);
+        } else if (len == 4) {
+          uint8_t pos = rx_data[1];
+          uint16_t frequency = rx_data[2] | (rx_data[3] << 8);
+          SetPWMFrequency(ch, pos, frequency);
+        }
+      }
       else if (cmd >= 0x0C && cmd <= 0x0D) {
         pwm_disable[ch][cmd-0x0C] = 1;
         pwm_pulse[ch][cmd-0x0C] = 0;
@@ -525,7 +563,14 @@ void Slave_Complete_Callback(uint8_t *rx_data, uint16_t len)
       }
       else if (cmd >= 2 && cmd <= 3) {
         i2c1_set_send_data((uint8_t *)&pwm_duty[ch][cmd-2], 1);
-      }    
+      }
+      else if (cmd == 7) {
+        buf[0] = pwm_frequency[ch][0] & 0xff;
+        buf[1] = (pwm_frequency[ch][0] >> 8) & 0xff;
+        buf[2] = pwm_frequency[ch][1] & 0xff;
+        buf[3] = (pwm_frequency[ch][1] >> 8) & 0xff;
+        i2c1_set_send_data(buf, 4);
+      }
       else if (cmd >= 0x0C && cmd <= 0x0D) {
         i2c1_set_send_data((uint8_t *)&servo_angle[ch][cmd-0x0C], 1);
       }     
@@ -663,21 +708,33 @@ int main(void)
         }
       }
     }
-    if(TIM16->CNT >= 2550)	
-    {
-      TIM16->CNT = 0;  
-    } 
     for(int i=0; i<CH_NUMBER; i++)
     {
       for(int j=0; j<2; j++) {
+        uint16_t pwm_count = (uint16_t)TIM16->CNT;
+        uint16_t pwm_elapsed;
+
         if (pwm_disable[i][j])
           continue;
-        if(TIM16->CNT <= pwm_pulse[i][j] && Switch[i][j]==0)
+        pwm_elapsed = pwm_count - pwm_cycle_start[i][j];
+        if (pwm_elapsed >= pwm_period[i][j])
+        {
+          pwm_cycle_start[i][j] = pwm_count;
+          pwm_elapsed = 0;
+        }
+        if (pwm_pulse[i][j] == 0)
+        {
+          if (Switch[i][j] != 0)
+            gpio_write_level_low(gpio_ch_to_port[i][j], gpio_pinmap[i][j]);
+          Switch[i][j] = 0;
+          continue;
+        }
+        if(pwm_elapsed <= pwm_pulse[i][j] && Switch[i][j]==0)
         {
           gpio_write_level_high(gpio_ch_to_port[i][j], gpio_pinmap[i][j]);
           Switch[i][j]=1;
         }
-        else if(TIM16->CNT > pwm_pulse[i][j] && Switch[i][j]!=0 && TIM16->CNT <= 2550)
+        else if(pwm_elapsed > pwm_pulse[i][j] && Switch[i][j]!=0)
         {
           gpio_write_level_low(gpio_ch_to_port[i][j], gpio_pinmap[i][j]);
           Switch[i][j]=0;
