@@ -4,6 +4,10 @@
 
 Contains Internal Firmware programs of M5Stack Unit PbHUB.
 
+## Documentation
+
+- [PBHUB v1.1 firmware v2 protocol and engineering reference](docs/pbhub-firmware-protocol.md)
+
 ### Firmware Version History
 
 - **V2**:
