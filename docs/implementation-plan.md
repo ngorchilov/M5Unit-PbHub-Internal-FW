@@ -95,8 +95,9 @@ be bundled with legacy IAP hardening.
 ## PR-01 implementation brief
 
 The implementation branch `pr/01-image-tooling` starts directly at upstream
-commit `6de9c0a9f2a3bffdbf17313d3a5aa933228ee772`. It has no planning-document
-commit and no upstream-tracking branch configured.
+commit `6de9c0a9f2a3bffdbf17313d3a5aa933228ee772`. It contains no planning-document
+commit and tracks only the matching `origin/pr/01-image-tooling` branch on the
+user's fork.
 
 ### Decisions
 
