@@ -92,6 +92,73 @@ be bundled with legacy IAP hardening.
 | PR-12 | Bound and verify the existing IAP page-write path | Preserve legacy opcodes while requiring a complete frame, exact 1024-byte count, aligned pages 4 through 14, unsigned packing and post-program verification; page 15 and out-of-flash writes are impossible |
 | PR-13 | Add a versioned acknowledged IAP protocol | New opcodes provide bounded frames, status, CRC, read-back verification, explicit finalize/abort and documented recovery; old `0x06`/`0x77` behavior remains isolated; end-to-end interrupted-update tests pass on a spare unit |
 
+## PR-01 implementation brief
+
+The implementation branch `pr/01-image-tooling` starts directly at upstream
+commit `6de9c0a9f2a3bffdbf17313d3a5aa933228ee772`. It has no planning-document
+commit and no upstream-tracking branch configured.
+
+### Decisions
+
+- Implement the tooling in dependency-free Python 3 using only the standard
+  library. Keep compatibility with the Python version supplied by current
+  GitHub-hosted Ubuntu runners; do not rely on the local Python 3.14 version.
+- Add `tools/pbhub_image.py` with two public operations:
+  - `verify IMAGE.hex` parses and validates a complete PBHUB factory image;
+  - `assemble --bootloader BOOT.bin --application APP.bin
+    --boot-version VERSION --output IMAGE.hex` creates a complete factory image.
+- Add `tests/test_pbhub_image.py` using `unittest`, not a third-party test
+  framework.
+- Add a focused GitHub Actions workflow that runs the tests and verifies the
+  repository's supplied factory image.
+- Add only durable command usage and image-layout information to the upstream
+  README. Do not copy the audit narrative or remediation roadmap into it.
+
+### Image contract enforced by the tool
+
+| Region | Address range | Size | Assembly rule |
+|---|---:|---:|---|
+| Bootloader payload | `0x08000000..0x08000FFE` | `0x0FFF` | Input binary followed by erased `0xFF` padding |
+| Bootloader version | `0x08000FFF` | 1 byte | Explicit unsigned CLI value |
+| Application payload | `0x08001000..0x08003BFB` | `0x2BFC` | Input binary followed by erased `0xFF` padding |
+| Application CRC | `0x08003BFC..0x08003BFF` | 4 bytes | CRC-32/ISO-HDLC over the preceding `0x2BFC` bytes, little-endian |
+| Settings | `0x08003C00..0x08003FFF` | `0x0400` | Erased `0xFF`; no settings input in PR-01 |
+
+The Intel HEX reader must validate syntax, record byte counts, record checksums,
+extended addressing, EOF placement, duplicate/overlapping data and explicit
+coverage of the complete 16 KiB range. The writer must emit deterministic
+uppercase records: one extended-linear-address record, 1024 ordered 16-byte data
+records and one EOF record.
+
+`verify` must fail with a nonzero status for malformed records, gaps, data outside
+the STM32's 16 KiB flash, a non-erased settings page or an application CRC
+mismatch. Its successful summary must include region boundaries, bootloader
+version, stored/calculated CRC and file SHA-256.
+
+`assemble` must reject an oversized bootloader, oversized application, invalid
+version value, colliding regions and any output that does not pass the same
+parser and verifier after writing.
+
+### Required tests
+
+1. Verify every checksum and all 1024 data records in the supplied factory HEX.
+2. Assert its full range, SHA-256, bootloader version 1, erased settings page and
+   stored/calculated CRC `0xCE41DBAC`.
+3. Slice the verified factory image into bootloader and application inputs,
+   assemble a new image, re-parse it and compare all 16 KiB byte-for-byte.
+4. Reject a corrupted record checksum, malformed record, missing EOF, data after
+   EOF, address gap, overlap and out-of-range data.
+5. Reject a corrupted application byte, stored CRC, non-erased settings byte,
+   oversized bootloader/application and invalid version.
+6. Confirm deterministic HEX output and successful CLI exit/error behavior.
+
+### Explicit non-goals
+
+PR-01 does not change C sources, Keil projects, linker regions, build compiler,
+firmware behavior, the I2C protocol or the checked-in factory image. It does not
+implement an I2C updater or commit generated binaries. Linker enforcement and
+source-owned version metadata remain PR-02.
+
 Keep [upstream issue #1](https://github.com/m5stack/M5Unit-PbHub-Internal-FW/issues/1)
 linked through PR-11 until configurable PWM is available in a released firmware
 image.
